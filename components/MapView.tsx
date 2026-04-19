@@ -1,8 +1,12 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import type { GeoJSONCollection } from '@/types';
 import { TAMPA_CENTER, TAMPA_ZOOM, MAP_STYLE, COLORS } from '@/lib/constants';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type MapInstance = any;
 
 interface Props {
   constructionData?: GeoJSONCollection;
@@ -13,7 +17,6 @@ interface Props {
   onFeatureClick: (props: Record<string, unknown>, layer: string) => void;
 }
 
-// Layer IDs
 const LAYER_IDS: Record<string, string[]> = {
   construction: ['construction-clusters', 'construction-count', 'construction-points'],
   row: ['row-clusters', 'row-count', 'row-points'],
@@ -30,10 +33,12 @@ export default function MapView({
   onFeatureClick,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<unknown>(null);
-  const loadedRef = useRef(false);
+  const mapRef = useRef<MapInstance>(null);
+  const [mapReady, setMapReady] = useState(false);
+  const clickHandlerRef = useRef(onFeatureClick);
+  clickHandlerRef.current = onFeatureClick;
 
-  // Init map once
+  // Initialize map
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
     let cancelled = false;
@@ -42,102 +47,91 @@ export default function MapView({
       if (cancelled || !containerRef.current) return;
       const maplibregl = mod.default;
 
-      // Load CSS
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/maplibre-gl/dist/maplibre-gl.css';
-      document.head.appendChild(link);
-
       const map = new maplibregl.Map({
-        container: containerRef.current,
+        container: containerRef.current!,
         style: MAP_STYLE,
         center: TAMPA_CENTER,
         zoom: TAMPA_ZOOM,
+        attributionControl: {},
       });
+
+      map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
 
       mapRef.current = map;
 
       map.on('load', () => {
-        loadedRef.current = true;
+        if (!cancelled) {
+          // Force resize to ensure canvas fills container
+          map.resize();
+          setMapReady(true);
+        }
       });
     });
 
     return () => {
       cancelled = true;
       if (mapRef.current) {
-        (mapRef.current as { remove: () => void }).remove();
+        mapRef.current.remove();
         mapRef.current = null;
-        loadedRef.current = false;
+        setMapReady(false);
       }
     };
   }, []);
 
-  // Add/update a GeoJSON source + clustered layers
-  function addClusteredLayer(
-    map: unknown,
-    id: string,
-    data: GeoJSONCollection,
-    color: string,
-    radius: number
-  ) {
-    const m = map as {
-      getSource: (id: string) => { setData: (d: unknown) => void } | undefined;
-      addSource: (id: string, spec: unknown) => void;
-      getLayer: (id: string) => unknown;
-      addLayer: (spec: unknown) => void;
-      on: (event: string, id: string, cb: (e: unknown) => void) => void;
-      getCanvas: () => { style: { cursor: string } };
-    };
+  // Helper: add or update a clustered GeoJSON layer
+  const addClusteredLayer = useCallback(
+    (map: MapInstance, id: string, data: GeoJSONCollection, color: string, radius: number) => {
+      if (map.getSource(id)) {
+        map.getSource(id).setData(data);
+        return;
+      }
 
-    if (m.getSource(id)) {
-      m.getSource(id)!.setData(data);
-      return;
-    }
+      map.addSource(id, {
+        type: 'geojson',
+        data,
+        cluster: true,
+        clusterMaxZoom: 14,
+        clusterRadius: 50,
+      });
 
-    m.addSource(id, {
-      type: 'geojson',
-      data,
-      cluster: true,
-      clusterMaxZoom: 14,
-      clusterRadius: 50,
-    });
-
-    // Cluster circles
-    if (!m.getLayer(`${id}-clusters`)) {
-      m.addLayer({
+      map.addLayer({
         id: `${id}-clusters`,
         type: 'circle',
         source: id,
         filter: ['has', 'point_count'],
         paint: {
           'circle-color': color,
-          'circle-radius': ['step', ['get', 'point_count'], radius, 10, radius + 5, 100, radius + 10],
-          'circle-opacity': 0.8,
+          'circle-radius': [
+            'step',
+            ['get', 'point_count'],
+            radius,
+            10,
+            radius + 5,
+            100,
+            radius + 10,
+            1000,
+            radius + 16,
+          ],
+          'circle-opacity': 0.85,
           'circle-stroke-width': 1,
           'circle-stroke-color': '#000',
         },
       });
-    }
 
-    // Cluster count labels
-    if (!m.getLayer(`${id}-count`)) {
-      m.addLayer({
+      map.addLayer({
         id: `${id}-count`,
         type: 'symbol',
         source: id,
         filter: ['has', 'point_count'],
         layout: {
           'text-field': '{point_count_abbreviated}',
-          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-font': ['Noto Sans Bold'],
           'text-size': 11,
         },
         paint: { 'text-color': '#fff' },
       });
-    }
 
-    // Individual points
-    if (!m.getLayer(`${id}-points`)) {
-      m.addLayer({
+      map.addLayer({
         id: `${id}-points`,
         type: 'circle',
         source: id,
@@ -151,36 +145,50 @@ export default function MapView({
         },
       });
 
-      m.on('click', `${id}-points`, (e: unknown) => {
-        const evt = e as { features?: Array<{ properties: Record<string, unknown> }> };
-        if (evt.features?.[0]) {
-          onFeatureClick(evt.features[0].properties, id);
+      // Click handler
+      map.on('click', `${id}-points`, (e: { features?: Array<{ properties: Record<string, unknown> }> }) => {
+        if (e.features?.[0]) {
+          clickHandlerRef.current(e.features[0].properties, id);
         }
       });
-      m.on('mouseenter', `${id}-points`, () => { m.getCanvas().style.cursor = 'pointer'; });
-      m.on('mouseleave', `${id}-points`, () => { m.getCanvas().style.cursor = ''; });
-    }
-  }
 
-  function addPointLayer(map: unknown, id: string, data: GeoJSONCollection, color: string, radius: number) {
-    const m = map as {
-      getSource: (id: string) => { setData: (d: unknown) => void } | undefined;
-      addSource: (id: string, spec: unknown) => void;
-      getLayer: (id: string) => unknown;
-      addLayer: (spec: unknown) => void;
-      on: (event: string, id: string, cb: (e: unknown) => void) => void;
-      getCanvas: () => { style: { cursor: string } };
-    };
+      // Zoom into cluster on click
+      map.on('click', `${id}-clusters`, (e: { features?: Array<{ properties: { cluster_id: number } }>; lngLat: { lng: number; lat: number } }) => {
+        if (!e.features?.[0]) return;
+        const clusterId = e.features[0].properties.cluster_id;
+        const source = map.getSource(id);
+        source.getClusterExpansionZoom(clusterId, (err: Error | null, zoom: number) => {
+          if (err) return;
+          map.easeTo({ center: [e.lngLat.lng, e.lngLat.lat], zoom });
+        });
+      });
 
-    if (m.getSource(id)) {
-      m.getSource(id)!.setData(data);
-      return;
-    }
+      map.on('mouseenter', `${id}-points`, () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseenter', `${id}-clusters`, () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', `${id}-points`, () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('mouseleave', `${id}-clusters`, () => {
+        map.getCanvas().style.cursor = '';
+      });
+    },
+    []
+  );
 
-    m.addSource(id, { type: 'geojson', data });
+  const addPointLayer = useCallback(
+    (map: MapInstance, id: string, data: GeoJSONCollection, color: string, radius: number) => {
+      if (map.getSource(id)) {
+        map.getSource(id).setData(data);
+        return;
+      }
 
-    if (!m.getLayer(`${id}-points`)) {
-      m.addLayer({
+      map.addSource(id, { type: 'geojson', data });
+
+      map.addLayer({
         id: `${id}-points`,
         type: 'circle',
         source: id,
@@ -193,85 +201,61 @@ export default function MapView({
         },
       });
 
-      m.on('click', `${id}-points`, (e: unknown) => {
-        const evt = e as { features?: Array<{ properties: Record<string, unknown> }> };
-        if (evt.features?.[0]) {
-          onFeatureClick(evt.features[0].properties, id);
+      map.on('click', `${id}-points`, (e: { features?: Array<{ properties: Record<string, unknown> }> }) => {
+        if (e.features?.[0]) {
+          clickHandlerRef.current(e.features[0].properties, id);
         }
       });
-      m.on('mouseenter', `${id}-points`, () => { m.getCanvas().style.cursor = 'pointer'; });
-      m.on('mouseleave', `${id}-points`, () => { m.getCanvas().style.cursor = ''; });
-    }
-  }
+      map.on('mouseenter', `${id}-points`, () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', `${id}-points`, () => {
+        map.getCanvas().style.cursor = '';
+      });
+    },
+    []
+  );
+
+  // Add data layers when map is ready AND data is available
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !constructionData) return;
+    addClusteredLayer(mapRef.current, 'construction', constructionData, COLORS.residentialNew, 14);
+  }, [mapReady, constructionData, addClusteredLayer]);
 
   useEffect(() => {
-    if (!constructionData) return;
-    const timer = setInterval(() => {
-      if (!mapRef.current) return;
-      if (loadedRef.current) {
-        clearInterval(timer);
-        addClusteredLayer(mapRef.current, 'construction', constructionData, COLORS.residentialNew, 14);
-      }
-    }, 200);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [constructionData]);
+    if (!mapReady || !mapRef.current || !rowData) return;
+    addClusteredLayer(mapRef.current, 'row', rowData, COLORS.row, 12);
+  }, [mapReady, rowData, addClusteredLayer]);
 
   useEffect(() => {
-    if (!rowData) return;
-    const timer = setInterval(() => {
-      if (!mapRef.current) return;
-      if (loadedRef.current) {
-        clearInterval(timer);
-        addClusteredLayer(mapRef.current, 'row', rowData, COLORS.row, 12);
-      }
-    }, 200);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowData]);
+    if (!mapReady || !mapRef.current || !capitalData) return;
+    addPointLayer(mapRef.current, 'capital', capitalData, COLORS.capital, 10);
+  }, [mapReady, capitalData, addPointLayer]);
 
   useEffect(() => {
-    if (!capitalData) return;
-    const timer = setInterval(() => {
-      if (!mapRef.current) return;
-      if (loadedRef.current) {
-        clearInterval(timer);
-        addPointLayer(mapRef.current, 'capital', capitalData, COLORS.capital, 10);
-      }
-    }, 200);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capitalData]);
-
-  useEffect(() => {
-    if (!singleFamilyData) return;
-    const timer = setInterval(() => {
-      if (!mapRef.current) return;
-      if (loadedRef.current) {
-        clearInterval(timer);
-        addClusteredLayer(mapRef.current, 'singleFamily', singleFamilyData, COLORS.singleFamily, 12);
-      }
-    }, 200);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [singleFamilyData]);
+    if (!mapReady || !mapRef.current || !singleFamilyData) return;
+    addClusteredLayer(mapRef.current, 'singleFamily', singleFamilyData, COLORS.singleFamily, 12);
+  }, [mapReady, singleFamilyData, addClusteredLayer]);
 
   // Layer visibility
   useEffect(() => {
-    if (!mapRef.current || !loadedRef.current) return;
-    const m = mapRef.current as {
-      getLayer: (id: string) => unknown;
-      setLayoutProperty: (id: string, prop: string, value: unknown) => void;
-    };
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
     Object.entries(LAYER_IDS).forEach(([layerKey, ids]) => {
       const vis = visibility[layerKey] !== false ? 'visible' : 'none';
       ids.forEach((id) => {
-        if (m.getLayer(id)) {
-          m.setLayoutProperty(id, 'visibility', vis);
+        if (map.getLayer(id)) {
+          map.setLayoutProperty(id, 'visibility', vis);
         }
       });
     });
-  }, [visibility]);
+  }, [mapReady, visibility]);
 
-  return <div ref={containerRef} className="absolute inset-0" />;
+  return (
+    <div
+      ref={containerRef}
+      className="absolute inset-0"
+      style={{ width: '100%', height: '100%' }}
+    />
+  );
 }

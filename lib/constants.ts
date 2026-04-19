@@ -12,6 +12,16 @@ export const ARCGIS_URLS = {
     'https://arcgis.tampagov.net/arcgis/rest/services/OpenData/Planning/MapServer/32',
 };
 
+// MapServer layer 30 fails with outFields=* on large result sets.
+// Use explicit field list to avoid the error.
+export const CONSTRUCTION_FIELDS = [
+  'OBJECTID', 'RECORD_ID', 'PROJECTNAME1', 'PROJECTNAME2',
+  'PROJECTDESCRIPTION', 'ADDRESS', 'ZIP', 'PROJECTSTATUS',
+  'RECORDTYPE', 'OCCUPANCYCATEGORY', 'OCCUPANCYTYPE',
+  'NEWCONSTRUCTIONSF', 'NBROFUNITS', 'PRIVATEPROVIDER',
+  'STOPWORKORDER', 'NEIGHBORHOOD', 'COUNCIL', 'CRA', 'URL',
+].join(',');
+
 export const COLORS = {
   residentialNew: '#3b82f6',
   commercialNew: '#f97316',

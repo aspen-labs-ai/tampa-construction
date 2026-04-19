@@ -1,5 +1,9 @@
 import type { ArcGISResponse, GeoJSONCollection, GeoJSONPoint } from '@/types';
 
+/**
+ * Fetch from ArcGIS REST API.
+ * Tries direct fetch first; if CORS fails, falls back to our /api/arcgis proxy.
+ */
 export async function fetchArcGIS(
   url: string,
   params: Record<string, string> = {}
@@ -9,12 +13,27 @@ export async function fetchArcGIS(
     outFields: '*',
     outSR: '4326',
     f: 'json',
-    resultRecordCount: '2000',
+    returnGeometry: 'true',
     ...params,
   });
-  const res = await fetch(`${url}/query?${q.toString()}`);
+  const directUrl = `${url}/query?${q.toString()}`;
+
+  let res: Response;
+  try {
+    res = await fetch(directUrl);
+  } catch {
+    // CORS or network error → use proxy
+    const proxyUrl = `/api/arcgis?url=${encodeURIComponent(directUrl)}`;
+    res = await fetch(proxyUrl);
+  }
+
   if (!res.ok) throw new Error(`ArcGIS error ${res.status} from ${url}`);
-  return res.json() as Promise<ArcGISResponse>;
+  const data = await res.json() as ArcGISResponse;
+  if ((data as unknown as { error?: unknown }).error) {
+    console.error('ArcGIS query error:', (data as unknown as { error: unknown }).error, url);
+    return { features: [] };
+  }
+  return data;
 }
 
 export async function paginateArcGIS(
@@ -23,11 +42,14 @@ export async function paginateArcGIS(
 ): Promise<ArcGISResponse['features']> {
   const all: ArcGISResponse['features'] = [];
   let offset = 0;
-  for (;;) {
+  const maxPages = 50; // safety limit
+  for (let page = 0; page < maxPages; page++) {
     const data = await fetchArcGIS(url, { ...params, resultOffset: String(offset) });
+    if (!data.features || data.features.length === 0) break;
     all.push(...data.features);
-    if (!data.exceededTransferLimit) break;
-    offset += 2000;
+    // Stop if we got fewer than the server max (2000) meaning no more pages
+    if (data.features.length < 2000 && !data.exceededTransferLimit) break;
+    offset += data.features.length;
   }
   return all;
 }
